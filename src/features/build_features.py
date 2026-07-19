@@ -1,11 +1,11 @@
 """
-Módulo para engenharia de atributos (features).
+Módulo para engenharia de atributos (features) do projeto de CVLI.
 """
 import pandas as pd
 
 def extract_temporal_features(df, date_column='data'):
     """
-    Extrai mês, dia da semana, trimestre e mês formatado a partir da coluna de data.
+    Extrai mês, dia da semana, trimestre e rótulos formatados a partir da coluna de data.
     """
     df_feat = df.copy()
     if date_column in df_feat.columns:
@@ -25,7 +25,7 @@ def extract_temporal_features(df, date_column='data'):
 
 def create_age_groups(df, age_column='idade_da_vítima'):
     """
-    Cria a variável categórica de faixas etárias.
+    Cria a variável categórica de faixas etárias padronizadas.
     """
     df_feat = df.copy()
     if age_column in df_feat.columns:
@@ -40,12 +40,24 @@ def create_age_groups(df, age_column='idade_da_vítima'):
 
 def categorize_rmf_vs_interior(df, region_column='regiao_planejamento'):
     """
-    Categoriza observações entre RMF (Grande Fortaleza) e Interior.
+    Categoriza observações entre RMF (Grande Fortaleza) e Interior do Ceará.
     """
     df_feat = df.copy()
     if region_column in df_feat.columns:
         rmf_regioes = ['Grande Fortaleza']
         df_feat['grupo'] = df_feat[region_column].apply(
-            lambda x: 'RMF (Grande Fortaleza)' if x in rmf_regioes else 'Interior'
+            lambda x: 'RMF (Grande Fortaleza)' if str(x).strip() in rmf_regioes else 'Interior'
         )
     return df_feat
+
+def calculate_regional_metrics(df, region_column='regiao_planejamento'):
+    """
+    Calcula métricas comparativas agregadas por Região de Planejamento do Ceará.
+    """
+    if region_column not in df.columns:
+        raise KeyError(f"Coluna {region_column} não encontrada no DataFrame.")
+        
+    resumo = df.groupby(region_column).size().reset_index(name='total_cvli')
+    resumo['pct_total'] = (resumo['total_cvli'] / resumo['total_cvli'].sum() * 100).round(2)
+    resumo = resumo.sort_values('total_cvli', ascending=False).reset_index(drop=True)
+    return resumo
