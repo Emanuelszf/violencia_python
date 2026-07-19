@@ -3,7 +3,6 @@ Módulo para carregamento de dados do projeto de CVLI.
 """
 import os
 import pandas as pd
-import geobr as gpd
 
 def _find_file(filename):
     """
@@ -19,12 +18,14 @@ def _find_file(filename):
             return path
     raise FileNotFoundError(f"Arquivo não encontrado: {filename}. Buscado em: {candidates}")
 
-def load_cvli_data(filename="CVLI_2009-a-2025.xlsx"):
+def load_cvli_data(filename="CVLI_2009-a-2025.xlsx", sheet_name=0):
     """
     Carrega o arquivo bruto de dados de CVLI.
     """
     path = _find_file(filename)
-    df = pd.read_excel(path)
+    # A análise usa explicitamente a primeira aba (CVLI). As demais abas
+    # possuem outras unidades/fenômenos e não entram neste notebook.
+    df = pd.read_excel(path, sheet_name=sheet_name)
     return df
 
 def load_planning_regions(filename="Lista_Regioes_Planejamento_Ceara (1).xlsx"):
@@ -43,5 +44,13 @@ def load_municipality_geodata(state="CE", year=2020):
     """
     Carrega os dados geográficos e malha municipal do IBGE via geobr.
     """
-    geo_ce = gpd.read_municipality(code_muni=state, year=year)
+    try:
+        import geobr
+    except ImportError as exc:
+        raise ImportError(
+            "A camada municipal exige o pacote 'geobr'. "
+            "Instale-o para executar os mapas: pip install geobr geopandas."
+        ) from exc
+
+    geo_ce = geobr.read_municipality(code_muni=state, year=year)
     return geo_ce

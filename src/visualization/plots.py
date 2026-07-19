@@ -366,3 +366,65 @@ def plot_seasonality_bars(dist_mes, dist_dia):
     fig.suptitle("Em quais períodos temporais e dias da semana a violência se intensifica?", fontsize=14, fontweight='bold', x=0.01, ha='left', y=1.02)
     plt.tight_layout()
     return fig, (ax1, ax2)
+
+
+def plot_municipality_period_maps(geo_ce, period_metrics, periods=None):
+    """Mapeia a média anual de CVLI por município em cada período."""
+    required_geo = {'code_muni', 'geometry'}
+    required_data = {'code_muni', 'periodo', 'media_anual_cvli'}
+    if not required_geo.issubset(geo_ce.columns):
+        raise KeyError(f"A geometria precisa conter: {sorted(required_geo)}")
+    if not required_data.issubset(period_metrics.columns):
+        raise KeyError(f"Os dados precisam conter: {sorted(required_data)}")
+
+    periods = periods or ['2009–2012', '2013–2016', '2017–2020', '2021–2025']
+    geo = geo_ce[['code_muni', 'geometry']].copy()
+    geo['code_muni'] = geo['code_muni'].astype('Int64')
+    data = period_metrics.copy()
+    data['code_muni'] = data['code_muni'].astype('Int64')
+    vmax = float(data['media_anual_cvli'].max())
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 11))
+    axes = axes.ravel()
+    for ax, period in zip(axes, periods):
+        subset = data[data['periodo'] == period]
+        map_data = geo.merge(
+            subset[['code_muni', 'media_anual_cvli']],
+            on='code_muni',
+            how='left',
+            validate='one_to_one',
+        )
+        map_data.plot(
+            column='media_anual_cvli',
+            ax=ax,
+            cmap='YlOrRd',
+            vmin=0,
+            vmax=vmax,
+            linewidth=0.25,
+            edgecolor='white',
+            legend=True,
+            missing_kwds={'color': '#eeeeee', 'label': 'Sem correspondência'},
+            legend_kwds={'label': 'Média anual de registros de CVLI', 'shrink': 0.65},
+        )
+        ax.set_title(period, loc='left', fontweight='bold')
+        ax.set_axis_off()
+
+    for ax in axes[len(periods):]:
+        ax.set_visible(False)
+    fig.suptitle(
+        'Volume médio anual de registros de CVLI por município e período',
+        fontsize=15,
+        fontweight='bold',
+        x=0.03,
+        ha='left',
+    )
+    fig.text(
+        0.03,
+        0.01,
+        'Nota: a escala é comum entre os mapas; valores representam contagens médias anuais, não taxas populacionais.',
+        fontsize=9,
+        style='italic',
+        color='#666666',
+    )
+    plt.tight_layout(rect=[0, 0.03, 1, 0.96])
+    return fig, axes

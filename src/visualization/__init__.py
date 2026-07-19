@@ -11,7 +11,8 @@ from .plots import (
     plot_crime_nature_breakdown,
     plot_victim_demographics,
     plot_monthly_heatmap,
-    plot_seasonality_bars
+    plot_seasonality_bars,
+    plot_municipality_period_maps
 )
 
 __all__ = [
@@ -24,5 +25,6 @@ __all__ = [
     "plot_crime_nature_breakdown",
     "plot_victim_demographics",
     "plot_monthly_heatmap",
-    "plot_seasonality_bars"
+    "plot_seasonality_bars",
+    "plot_municipality_period_maps"
 ]

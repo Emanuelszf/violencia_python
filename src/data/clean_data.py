@@ -2,6 +2,9 @@
 Módulo de tratamento e limpeza de dados de CVLI.
 """
 
+import re
+import unicodedata
+
 def clean_column_names(df):
     """
     Padroniza os nomes das colunas (minúsculas, sem espaços, com underscore).
@@ -9,6 +12,42 @@ def clean_column_names(df):
     df_clean = df.copy()
     df_clean.columns = df_clean.columns.str.strip().str.lower().str.replace(' ', '_')
     return df_clean
+
+
+def normalize_municipality_name(value):
+    """Normaliza nomes para chaves de junção sem alterar o texto exibido."""
+    if value is None:
+        return ""
+    text = str(value).strip().casefold()
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    return re.sub(r"\s+", " ", text)
+
+
+def prepare_planning_regions(df):
+    """Padroniza o arquivo local de municípios e Regiões de Planejamento."""
+    planning = clean_column_names(df)
+    planning.columns = (
+        planning.columns
+        .str.replace("(", "", regex=False)
+        .str.replace(")", "", regex=False)
+    )
+    rename_dict = {
+        "código_do_município_ibge": "code_muni",
+        "nome_do_município": "municipio",
+        "região_de_planejamento": "regiao_planejamento",
+    }
+    planning = planning.rename(columns=rename_dict)
+    required = {"code_muni", "municipio", "regiao_planejamento"}
+    missing = required.difference(planning.columns)
+    if missing:
+        raise KeyError(f"Colunas ausentes no mapeamento regional: {sorted(missing)}")
+    planning = planning[["code_muni", "municipio", "regiao_planejamento"]].copy()
+    planning["code_muni"] = planning["code_muni"].astype("Int64")
+    planning["municipio_key"] = planning["municipio"].map(normalize_municipality_name)
+    if planning["municipio_key"].duplicated().any():
+        raise ValueError("O mapeamento regional contém municípios duplicados.")
+    return planning
 
 def merge_geodata_and_regions(df_data, geo_ce, planejamento):
     """
@@ -33,22 +72,7 @@ def merge_geodata_and_regions(df_data, geo_ce, planejamento):
     data_copy['code_muni'] = data_copy['code_muni'].astype('Int64')
 
     # Preparar regiões de planejamento
-    planejamento_copy.columns = (
-        planejamento_copy.columns.str.strip()
-        .str.lower()
-        .str.replace(' ', '_')
-        .str.replace('(', '')
-        .str.replace(')', '')
-    )
-    rename_dict = {
-        'código_do_município_ibge': 'code_muni',
-        'nome_do_município': 'nome_muni_plan',
-        'região_de_planejamento': 'regiao_planejamento'
-    }
-    planejamento_copy = planejamento_copy.rename(columns=rename_dict)
-    planejamento_copy['code_muni'] = planejamento_copy['code_muni'].astype('Int64')
-    
-    # Mapeamento único code_muni -> regiao_planejamento
+    planejamento_copy = prepare_planning_regions(planejamento)
     df_regioes = planejamento_copy[['code_muni', 'regiao_planejamento']].drop_duplicates()
 
     # Merge com regiões
