@@ -65,7 +65,12 @@ def load_population_data(
 ):
     """
     Carrega e consolida os dados de população de todos os municípios do Ceará (2009-2025).
-    Retorna DataFrame com colunas ['code_muni', 'ano', 'populacao'].
+    Retorna um painel município-ano com população e proveniência.
+
+    Observação metodológica:
+    a população de 2023 é imputada pela média aritmética das populações
+    municipais de 2020, 2021 e 2022. O parâmetro ``filename_tcu_2023`` é
+    mantido apenas por compatibilidade e não participa do cálculo.
     """
     from src.data.clean_data import normalize_municipality_name, prepare_planning_regions
 
@@ -100,6 +105,8 @@ def load_population_data(
                             'code_muni': c_muni,
                             'ano': int(float(yr)),
                             'populacao': float(val),
+                            'tipo_populacao': 'estimativa',
+                            'fonte_populacao': 'IBGE - Estimativas da População',
                         })
 
     # 2. pop_2010.xlsx (2010)
@@ -112,6 +119,8 @@ def load_population_data(
                 'code_muni': muni_map[muni_key],
                 'ano': 2010,
                 'populacao': float(row.iloc[1]),
+                'tipo_populacao': 'censo',
+                'fonte_populacao': 'IBGE - Censo Demográfico 2010',
             })
 
     # 3. pop_2022.xlsx (2022)
@@ -124,29 +133,63 @@ def load_population_data(
                 'code_muni': muni_map[muni_key],
                 'ano': 2022,
                 'populacao': float(row.iloc[3]),
+                'tipo_populacao': 'censo',
+                'fonte_populacao': 'IBGE - Censo Demográfico 2022',
             })
 
-    # 4. POP_TCU_2023 para 2023
-    path_tcu = _find_file(filename_tcu_2023)
-    df_tcu = pd.read_excel(path_tcu)
-    df_tcu.columns = [str(c).strip() for c in df_tcu.iloc[0]]
-    df_ce = df_tcu.iloc[1:][df_tcu.iloc[1:]['UF'] == 'CE'].copy()
-    df_ce['code_muni'] = (
-        df_ce['COD. UF'].astype(str) + df_ce['COD. MUNIC'].astype(str).str.zfill(5)
-    ).astype(int)
-    pop_col = [c for c in df_ce.columns if 'POPULA' in str(c)][0]
-    for _, row in df_ce.iterrows():
-        c_muni = int(row['code_muni'])
-        val = str(row[pop_col]).replace('.', '').replace(',', '.').strip()
+    # 4. Imputação de 2023 pela média dos três anos anteriores (2020–2022)
+    population_history = pd.DataFrame(records)
+    previous_three_years = population_history[
+        population_history['ano'].isin([2020, 2021, 2022])
+    ]
+    observations_per_municipality = previous_three_years.groupby(
+        'code_muni'
+    )['ano'].nunique()
+    if (
+        len(observations_per_municipality) != len(planning)
+        or not observations_per_municipality.eq(3).all()
+    ):
+        raise ValueError(
+            "Não foi possível imputar 2023: os anos de 2020 a 2022 "
+            "não cobrem integralmente os 184 municípios."
+        )
+    population_2023 = (
+        previous_three_years.groupby('code_muni', as_index=False)['populacao']
+        .mean()
+    )
+    for record in population_2023.to_dict('records'):
         records.append({
-            'code_muni': c_muni,
+            'code_muni': record['code_muni'],
             'ano': 2023,
-            'populacao': float(val),
+            'populacao': record['populacao'],
+            'tipo_populacao': 'imputada_media_3_anos',
+            'fonte_populacao': 'Imputação pela média de 2020, 2021 e 2022',
         })
 
     pop_df = pd.DataFrame(records)
-    pop_df = pop_df.drop_duplicates(subset=['code_muni', 'ano']).sort_values(['code_muni', 'ano']).reset_index(drop=True)
+    duplicate_keys = pop_df.duplicated(subset=['code_muni', 'ano'], keep=False)
+    if duplicate_keys.any():
+        duplicate_sample = pop_df.loc[duplicate_keys, ['code_muni', 'ano']].head().to_dict('records')
+        raise ValueError(f"Há chaves município-ano duplicadas na população: {duplicate_sample}")
+
+    pop_df = pop_df.sort_values(['code_muni', 'ano']).reset_index(drop=True)
     pop_df['code_muni'] = pop_df['code_muni'].astype('Int64')
     pop_df['ano'] = pop_df['ano'].astype(int)
+
+    expected_keys = pd.MultiIndex.from_product(
+        [planning['code_muni'].astype('Int64').tolist(), range(2009, 2026)],
+        names=['code_muni', 'ano'],
+    )
+    observed_keys = pd.MultiIndex.from_frame(pop_df[['code_muni', 'ano']])
+    missing_keys = expected_keys.difference(observed_keys)
+    extra_keys = observed_keys.difference(expected_keys)
+    if len(missing_keys) or len(extra_keys):
+        raise ValueError(
+            "Cobertura populacional inválida: "
+            f"{len(missing_keys)} chaves ausentes e {len(extra_keys)} chaves excedentes."
+        )
+    if pop_df['populacao'].isna().any() or pop_df['populacao'].le(0).any():
+        raise ValueError("A população contém valores ausentes, nulos ou negativos.")
+
     return pop_df
 

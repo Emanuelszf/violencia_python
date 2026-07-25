@@ -37,7 +37,14 @@ def create_age_groups(df, age_column='idade_da_vítima'):
         idade_num = pd.to_numeric(df_feat[age_column], errors='coerce')
         bins = [0, 14, 17, 24, 29, 39, 49, 59, 120]
         labels = ['0-14', '15-17', '18-24', '25-29', '30-39', '40-49', '50-59', '60+']
-        df_feat['faixa_etaria'] = pd.cut(idade_num, bins=bins, labels=labels, right=True)
+        df_feat['faixa_etaria'] = pd.cut(
+            idade_num,
+            bins=bins,
+            labels=labels,
+            right=True,
+            include_lowest=True,
+            ordered=True,
+        )
         
     return df_feat
 
@@ -210,8 +217,13 @@ def calculate_concentration_metrics(period_metrics, period_column='periodo'):
     return pd.DataFrame(rows)
 
 
-def add_population_rates(panel, population_df, population_column='populacao'):
-    """Anexa população município–ano e calcula taxa por 100 mil habitantes."""
+def add_population_rates(
+    panel,
+    population_df,
+    population_column='populacao',
+    require_complete=True,
+):
+    """Anexa população município–ano e calcula a taxa de CVLI por 100 mil."""
     required = {'code_muni', 'ano', population_column}
     missing = required.difference(population_df.columns)
     if missing:
@@ -219,12 +231,27 @@ def add_population_rates(panel, population_df, population_column='populacao'):
     if population_df.duplicated(['code_muni', 'ano']).any():
         raise ValueError('O arquivo de população possui duplicidade em code_muni–ano.')
 
+    population_columns = ['code_muni', 'ano', population_column]
+    population_columns += [
+        column
+        for column in ['tipo_populacao', 'fonte_populacao']
+        if column in population_df.columns
+    ]
     result = panel.merge(
-        population_df[['code_muni', 'ano', population_column]],
+        population_df[population_columns],
         on=['code_muni', 'ano'],
         how='left',
         validate='one_to_one',
     )
+    invalid_population = result[population_column].isna() | result[population_column].le(0)
+    if require_complete and invalid_population.any():
+        sample = result.loc[
+            invalid_population, ['code_muni', 'ano', population_column]
+        ].head().to_dict('records')
+        raise ValueError(
+            "Não foi possível calcular todas as taxas por falta de população válida. "
+            f"Exemplos: {sample}"
+        )
     result['taxa_cvli_100k'] = (
         result['total_cvli'] / result[population_column] * 100_000
     ).where(result[population_column].gt(0))
