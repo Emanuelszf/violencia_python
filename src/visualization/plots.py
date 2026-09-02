@@ -485,6 +485,7 @@ def _plot_vertical_profile(
     total_count,
     wrap_width=16,
     figsize=(11.5, 6.3),
+    bar_width=None,
 ):
     """Base visual para gráficos verticais do perfil das vítimas."""
     set_chart_style()
@@ -500,6 +501,9 @@ def _plot_vertical_profile(
         COLOR_ACCENT if value == max_value else COLOR_SECONDARY
         for value in data['total']
     ]
+    if bar_width is None:
+        bar_width = 0.45 if len(labels) <= 3 else 0.68
+
     fig, ax = plt.subplots(figsize=figsize)
     bars = ax.bar(
         labels,
@@ -507,7 +511,7 @@ def _plot_vertical_profile(
         color=colors,
         edgecolor=COLOR_BG,
         linewidth=0.8,
-        width=0.68,
+        width=bar_width,
     )
     ax.set_ylim(0, max_value * 1.22)
     for bar, row in zip(bars, data.itertuples(index=False)):
@@ -543,6 +547,23 @@ def _plot_vertical_profile(
     )
     plt.tight_layout(rect=[0.05, 0.05, 0.99, 0.94])
     return fig, ax
+
+
+def plot_gender_distribution(distribution, valid_count, total_count):
+    """Gráfico vertical de vítimas por gênero."""
+    category_column = 'genero' if 'genero' in distribution.columns else 'gênero' if 'gênero' in distribution.columns else distribution.columns[0]
+    return _plot_vertical_profile(
+        distribution=distribution,
+        category_column=category_column,
+        question="Como as vítimas se distribuem por gênero?",
+        subtitle="Vítimas por gênero · registros com informação válida",
+        xlabel="Gênero",
+        valid_count=valid_count,
+        total_count=total_count,
+        wrap_width=12,
+        figsize=(8.5, 6.0),
+        bar_width=0.45,
+    )
 
 
 def plot_age_distribution(distribution, valid_count, total_count):

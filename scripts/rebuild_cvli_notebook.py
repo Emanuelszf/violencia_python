@@ -69,6 +69,7 @@ cells = [
             plot_age_distribution,
             plot_crime_nature_bar,
             plot_education_distribution,
+            plot_gender_distribution,
             plot_monthly_heatmap,
             plot_municipality_period_maps,
             plot_race_distribution,
@@ -306,6 +307,8 @@ cells = [
             }
             return texto.notna() & ~texto.isin(categorias_ausentes)
 
+        col_genero = "gênero" if "gênero" in cvli.columns else "genero"
+        genero_valido = mascara_informacao_valida(cvli[col_genero])
         escolaridade_valida = mascara_informacao_valida(
             cvli["escolaridade_da_vítima"]
         )
@@ -313,8 +316,9 @@ cells = [
 
         cobertura_demografica = pd.DataFrame(
             {
-                "campo": ["Idade", "Escolaridade", "Raça/cor"],
+                "campo": ["Gênero", "Idade", "Escolaridade", "Raça/cor"],
                 "registros_validos": [
+                    genero_valido.sum(),
                     idade_valida.sum(),
                     escolaridade_valida.sum(),
                     raca_valida.sum(),
@@ -702,6 +706,17 @@ cells = [
     ),
     code(
         """
+        col_genero = "gênero" if "gênero" in cvli.columns else "genero"
+        distribuicao_genero = (
+            cvli.loc[genero_valido, col_genero]
+            .value_counts()
+            .rename_axis("genero")
+            .reset_index(name="total")
+        )
+        distribuicao_genero["pct"] = (
+            distribuicao_genero["total"] / distribuicao_genero["total"].sum() * 100
+        )
+
         cvli_perfil = create_age_groups(cvli)
 
         distribuicao_idade = (
@@ -747,9 +762,20 @@ cells = [
             * 100
         )
 
+        display(distribuicao_genero.round({"pct": 2}))
         display(distribuicao_idade.round({"pct": 2}))
         display(distribuicao_raca.round({"pct": 2}))
         display(distribuicao_escolaridade.round({"pct": 2}))
+        """
+    ),
+    code(
+        """
+        fig_genero, _ = plot_gender_distribution(
+            distribuicao_genero,
+            valid_count=int(genero_valido.sum()),
+            total_count=len(cvli),
+        )
+        plt.show()
         """
     ),
     code(
@@ -784,6 +810,7 @@ cells = [
     ),
     code(
         """
+        genero_lider = distribuicao_genero.iloc[0]
         faixa_lider = distribuicao_idade.loc[distribuicao_idade["total"].idxmax()]
         raca_lider = distribuicao_raca.iloc[0]
         escolaridade_lider = distribuicao_escolaridade.loc[
@@ -792,7 +819,8 @@ cells = [
         display(
             Markdown(
                 f'''
-                **Leitura conjunta:** entre idades válidas, a faixa **{faixa_lider['faixa_etaria']}**
+                **Leitura conjunta:** a maioria das vítimas é do sexo **{genero_lider['genero']}**
+                ({genero_lider['pct']:.1f}%). Entre idades válidas, a faixa **{faixa_lider['faixa_etaria']}**
                 concentra {faixa_lider['pct']:.1f}% dos registros. Entre os registros válidos
                 de raça/cor, **{raca_lider['raca']}** representa {raca_lider['pct']:.1f}%.
                 Em escolaridade válida, a categoria mais frequente é

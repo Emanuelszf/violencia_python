@@ -1,6 +1,8 @@
 """
 Módulo para carregamento de dados do projeto de CVLI.
 """
+import ctypes
+import io
 import os
 import pandas as pd
 
@@ -18,6 +20,42 @@ def _find_file(filename):
             return path
     raise FileNotFoundError(f"Arquivo não encontrado: {filename}. Buscado em: {candidates}")
 
+def _read_excel_robust(path, sheet_name=0):
+    """
+    Lê um arquivo Excel (.xlsx ou .xls) tratando conflitos de bloqueio no Windows
+    (por exemplo, quando o arquivo está aberto no Microsoft Excel).
+    """
+    try:
+        return pd.read_excel(path, sheet_name=sheet_name)
+    except PermissionError:
+        if os.name == 'nt':
+            GENERIC_READ = 0x80000000
+            FILE_SHARE_READ = 0x00000001
+            FILE_SHARE_WRITE = 0x00000002
+            FILE_SHARE_DELETE = 0x00000004
+            OPEN_EXISTING = 3
+            FILE_ATTRIBUTE_NORMAL = 0x80
+
+            abs_path = os.path.abspath(path)
+            handle = ctypes.windll.kernel32.CreateFileW(
+                abs_path, GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                None, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, None
+            )
+            if handle != -1 and handle != 4294967295:
+                try:
+                    size_high = ctypes.c_ulong(0)
+                    size_low = ctypes.windll.kernel32.GetFileSize(handle, ctypes.byref(size_high))
+                    total_size = (size_high.value << 32) + size_low
+                    buf = ctypes.create_string_buffer(total_size)
+                    bytes_read = ctypes.c_ulong(0)
+                    res = ctypes.windll.kernel32.ReadFile(handle, buf, total_size, ctypes.byref(bytes_read), None)
+                    if res:
+                        return pd.read_excel(io.BytesIO(buf.raw), sheet_name=sheet_name)
+                finally:
+                    ctypes.windll.kernel32.CloseHandle(handle)
+        raise
+
 def load_cvli_data(filename="CVLI_2009-a-2025.xlsx", sheet_name=0):
     """
     Carrega o arquivo bruto de dados de CVLI.
@@ -25,7 +63,16 @@ def load_cvli_data(filename="CVLI_2009-a-2025.xlsx", sheet_name=0):
     path = _find_file(filename)
     # A análise usa explicitamente a primeira aba (CVLI). As demais abas
     # possuem outras unidades/fenômenos e não entram neste notebook.
-    df = pd.read_excel(path, sheet_name=sheet_name)
+    df = _read_excel_robust(path, sheet_name=sheet_name)
+    cols_lower = [str(c).strip().lower() for c in df.columns]
+    if 'ano' not in cols_lower:
+        date_col = None
+        for col in df.columns:
+            if str(col).strip().lower() == 'data':
+                date_col = col
+                break
+        if date_col is not None:
+            df['ano'] = pd.to_datetime(df[date_col], errors='coerce').dt.year
     return df
 
 def load_planning_regions(filename="Lista_Regioes_Planejamento_Ceara (1).xlsx"):
@@ -37,7 +84,7 @@ def load_planning_regions(filename="Lista_Regioes_Planejamento_Ceara (1).xlsx"):
     except FileNotFoundError:
         # Tenta sem o ' (1)' no nome se tiver sido renomeado
         path = _find_file("Lista_Regioes_Planejamento_Ceara.xlsx")
-    planejamento = pd.read_excel(path)
+    planejamento = _read_excel_robust(path)
     return planejamento
 
 def load_municipality_geodata(state="CE", year=2020):
@@ -91,7 +138,7 @@ def load_population_data(
 
     # 1. pop_sem_censos.xlsx (2009, 2011-2021, 2024-2025)
     path_sem = _find_file(filename_sem_censos)
-    df_sem = pd.read_excel(path_sem)
+    df_sem = _read_excel_robust(path_sem)
     years_row = df_sem.iloc[2].values[1:]
     for _, row in df_sem.iloc[3:].iterrows():
         muni_key = _clean_muni_str(row.iloc[0])
@@ -111,7 +158,7 @@ def load_population_data(
 
     # 2. pop_2010.xlsx (2010)
     path_2010 = _find_file(filename_2010)
-    df_2010 = pd.read_excel(path_2010)
+    df_2010 = _read_excel_robust(path_2010)
     for _, row in df_2010.iloc[4:].iterrows():
         muni_key = _clean_muni_str(row.iloc[0])
         if muni_key in muni_map and pd.notna(row.iloc[1]):
@@ -125,7 +172,7 @@ def load_population_data(
 
     # 3. pop_2022.xlsx (2022)
     path_2022 = _find_file(filename_2022)
-    df_2022 = pd.read_excel(path_2022)
+    df_2022 = _read_excel_robust(path_2022)
     for _, row in df_2022.iloc[4:].iterrows():
         muni_key = _clean_muni_str(row.iloc[0])
         if muni_key in muni_map and pd.notna(row.iloc[3]):
@@ -192,4 +239,3 @@ def load_population_data(
         raise ValueError("A população contém valores ausentes, nulos ou negativos.")
 
     return pop_df
-
