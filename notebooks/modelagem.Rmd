@@ -1,0 +1,26 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+options(scipen = 999)
+library(readr)
+```
+
+
+```{r}
+df = read_csv("~/violência/data/crime_violento_2022_2025.csv")
+```
+
+```{r}
+df$crescimento_cvli_log_2022_2025 = log(df$cvli_2025 + 1) - log(df$cvli_2022 + 1)
+```
+
+
+```{r}
+modelo1 = lm(crescimento_cvli_log_2022_2025 ~ log(urbanizacao_2022) + log(taxa_desocupacao_2022_pct) + log (rendimento_medio_mensal_2022_brl)+ log(populacao_2022) + crescimento_populacional_2022_2025_pct + log(densidade_2022_hab_km2) + log(taxa_sem_instrucao_ou_fundamental_incompleto_2022_pct), df)
+
+summary(modelo1)
+```
+
