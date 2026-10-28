@@ -6,6 +6,12 @@ output: html_notebook
 ```{r}
 options(scipen = 999)
 library(readr)
+library(car)
+library(sf)
+library(spdep)
+library(tidyverse)
+library(lmtest)
+library(spatialreg)
 ```
 
 
@@ -23,4 +29,226 @@ modelo1 = lm(crescimento_cvli_log_2022_2025 ~ log(urbanizacao_2022) + log(taxa_d
 
 summary(modelo1)
 ```
+```{r}
+modelo2 = lm(crescimento_cvli_log_2022_2025 ~ log(urbanizacao_2022) + log(taxa_desocupacao_2022_pct) + log (rendimento_medio_mensal_2022_brl)+ log(populacao_2022) + crescimento_populacional_2022_2025_pct + log(densidade_2022_hab_km2) + log(cvli_2022+1) + log(taxa_sem_instrucao_ou_fundamental_incompleto_2022_pct) +tx_adm_pub + tx_agro + tx_comercio +tx_construcao_civil + tx_industria_transformacao + tx_servicos, df)
 
+summary(modelo2)
+```
+```{r}
+vif(modelo2)
+```
+```{r}
+modelo3 = lm(crescimento_cvli_log_2022_2025 ~ log(urbanizacao_2022) + log(taxa_desocupacao_2022_pct) + log (rendimento_medio_mensal_2022_brl)+ log(populacao_2022) + crescimento_populacional_2022_2025_pct + log(densidade_2022_hab_km2) + log(cvli_2022+1) + log(taxa_sem_instrucao_ou_fundamental_incompleto_2022_pct) + tx_agro + tx_comercio +tx_construcao_civil + tx_industria_transformacao + tx_servicos, df)
+
+vif(modelo3)
+```
+```{r}
+summary(modelo3)
+```
+
+## Baixando a malha municipal
+
+```{r}
+url_malha = paste0(
+  "https://geoftp.ibge.gov.br/organizacao_do_territorio/",
+  "malhas_territoriais/malhas_municipais/",
+  "municipio_2022/UFs/CE/CE_Municipios_2022.zip"
+)
+
+pasta_malha = file.path(tempdir(), "malha_ce_2022")
+dir.create(pasta_malha, showWarnings = FALSE)
+
+arquivo_zip = file.path(pasta_malha, "CE_Municipios_2022.zip")
+
+download.file(
+  url = url_malha,
+  destfile = arquivo_zip,
+  mode = "wb"
+)
+
+unzip(arquivo_zip, exdir = pasta_malha)
+
+arquivo_shp = list.files(
+  pasta_malha,
+  pattern = "\\.shp$",
+  full.names = TRUE,
+  recursive = TRUE
+)
+
+stopifnot(length(arquivo_shp) == 1)
+
+malha_ce = st_read(arquivo_shp, quiet = TRUE)
+
+# SIRGAS 2000 / UTM 24S: coordenadas projetadas em metros
+malha_ce = st_transform(malha_ce, 31984)
+malha_ce = st_make_valid(malha_ce)
+```
+
+## alinhas aos municipios 
+
+```{r}
+# Remove um possível caractere invisível no nome de code_muni
+names(df) = sub("^\ufeff", "", names(df))
+
+# Identifica as linhas efetivamente utilizadas na regressão
+dados_modelo = model.frame(modelo3)
+
+linhas_usadas = match(
+  rownames(dados_modelo),
+  rownames(as.data.frame(df))
+)
+
+stopifnot(!anyNA(linhas_usadas))
+
+codigos_modelo = as.character(df$code_muni[linhas_usadas])
+codigos_malha = as.character(malha_ce$CD_MUN)
+
+stopifnot(
+  !anyNA(codigos_modelo),
+  !anyDuplicated(codigos_modelo),
+  !anyDuplicated(codigos_malha)
+)
+
+# Ordena a malha conforme a amostra da regressão
+posicoes = match(codigos_modelo, codigos_malha)
+
+if (anyNA(posicoes)) {
+  stop("Há códigos municipais do modelo sem correspondência na malha.")
+}
+
+malha_modelo = malha_ce[posicoes, ]
+
+stopifnot(
+  nrow(malha_modelo) == nobs(modelo3),
+  identical(
+    as.character(malha_modelo$CD_MUN),
+    codigos_modelo
+  )
+)
+```
+
+## Construindo a matriz de vizinhança
+```{r}
+vizinhos = poly2nb(
+  malha_modelo,
+  queen = TRUE,
+  row.names = rownames(dados_modelo)
+)
+
+# Quantos vizinhos cada município tem?
+summary(card(vizinhos))
+
+# Verifica municípios sem vizinhos na amostra
+sem_vizinhos = which(card(vizinhos) == 0)
+
+if (length(sem_vizinhos) > 0) {
+  print(
+    st_drop_geometry(malha_modelo[sem_vizinhos, ])[
+      , c("CD_MUN", "NM_MUN")
+    ]
+  )
+
+  stop("Existem municípios sem vizinhos. Confira antes de realizar os testes.")
+}
+
+# Número de componentes conectados da rede
+n.comp.nb(vizinhos)$nc
+
+# Pesos normalizados por linha
+pesos_w = nb2listw(
+  vizinhos,
+  style = "W",
+  zero.policy = FALSE
+)
+```
+## Teste de Moran
+```{r}
+moran_residuos = lm.morantest(
+  modelo3,
+  listw = pesos_w,
+  alternative = "two.sided",
+  zero.policy = FALSE,
+  spChk = TRUE,
+  naSubset = FALSE
+)
+
+moran_residuos
+```
+
+```{r}
+testes_rs = lm.RStests(
+  modelo3,
+  listw = pesos_w,
+  test = c(
+    "RSerr",
+    "RSlag",
+    "adjRSerr",
+    "adjRSlag"
+  ),
+  zero.policy = FALSE,
+  spChk = TRUE,
+  naSubset = FALSE
+)
+
+testes_rs
+```
+## Verificação do valor de Moran
+
+```{r}
+cvli_medio = df |> 
+  group_by(code_muni) |>
+  summarise(letal_media = mean(crescimento_cvli_log_2022_2025, na.rm = TRUE), .groups = "drop") |>
+  arrange(code_muni)
+
+moran_geral = moran.test(cvli_medio$letal_media, pesos_w, zero.policy = TRUE)
+print(moran_geral)
+
+```
+
+## Verificando heterocedasticidade
+
+```{r}
+bptest(modelo3)
+```
+## Criando modelo de SEM
+```{r}
+# 1. Recuperar a amostra utilizada no modelo3
+base_sem = as.data.frame(df)
+
+ids_modelo = rownames(model.frame(modelo3))
+posicoes = match(ids_modelo, rownames(base_sem))
+
+if (anyNA(posicoes)) {
+  stop("Não foi possível localizar no df as linhas usadas no modelo3.")
+}
+
+base_sem = base_sem[posicoes, , drop = FALSE]
+
+# 2. Conferir tamanho e ordem em relação à matriz
+ids_pesos = attr(pesos_w$neighbours, "region.id")
+
+if (nrow(base_sem) != length(pesos_w$neighbours)) {
+  stop("A amostra do modelo3 e a matriz pesos_w têm tamanhos diferentes.")
+}
+
+if (!identical(as.character(ids_modelo), as.character(ids_pesos))) {
+  stop("A ordem dos identificadores do modelo3 não coincide com pesos_w.")
+}
+
+# 3. Estimar o modelo de erro espacial
+mod_sem = spatialreg::errorsarlm(
+  formula = formula(modelo3),
+  data = base_sem,
+  listw = pesos_w,
+  method = "eigen",
+  na.action = na.fail,
+  zero.policy = FALSE
+)
+
+# 4. Resultados
+options(width = 160)
+summary(mod_sem)
+
+# 5. Comparação com o MQO
+AIC(modelo3, mod_sem)
+```
