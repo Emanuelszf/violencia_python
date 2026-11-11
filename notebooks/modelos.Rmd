@@ -1,0 +1,622 @@
+---
+title: "CVLI no Ceará: modelos para os crescimentos de 2022 a 2023, 2024 e 2025"
+output:
+  html_notebook:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+---
+
+Uma observação por município. As mesmas especificações são estimadas para cada
+target na mesma amostra. Execute as cinco etapas em ordem. Os resultados usam
+a saída nativa de `print(summary(modelo))`, sem tabelas de knitr, kableExtra
+ou modelsummary.
+
+# Dados
+
+## Configuração e caminhos
+
+Os caminhos funcionam a partir da raiz do projeto ou de `notebooks`.
+Os pacotes devem estar instalados previamente; o documento não instala pacotes.
+
+```{r configuracao, message=FALSE}
+pacotes = c("fixest", "readr", "car", "sf", "spdep", "lmtest",
+            "sandwich", "spatialreg", "sphet")
+faltantes = pacotes[!vapply(pacotes, requireNamespace, logical(1), quietly = TRUE)]
+if (length(faltantes) > 0) {
+  stop("Instale antes os pacotes: ", paste(faltantes, collapse = ", "))
+}
+options(scipen = 999, width = 140)
+
+raizes = c(".", "..")
+encontradas = raizes[file.exists(file.path(raizes, "data", "crime_violento_2022_2025.csv"))]
+if (length(encontradas) == 0) stop("Execute a partir da raiz do projeto ou de notebooks.")
+raiz_projeto = normalizePath(encontradas[1], winslash = "/", mustWork = TRUE)
+pasta_dados = file.path(raiz_projeto, "data")
+caminho_csv = file.path(pasta_dados, "crime_violento_2022_2025.csv")
+pasta_malha = file.path(pasta_dados, "malha_ce_2022")
+
+anos_cvli = 2022:2025
+anos_finais = 2023:2025
+targets = setNames(paste0("crescimento_cvli_log_2022_", anos_finais),
+                   paste0("2022_", anos_finais))
+rotulos_targets = setNames(paste0("2022–", anos_finais), names(targets))
+```
+
+## Contagens anuais e variáveis-alvo
+
+Cada alvo é `log1p(cvli_final) - log1p(cvli_2022)`. A adição de 1 mantém os
+municípios com zero registro. Essa diferença de logs de contagens ajustadas
+não é o crescimento percentual usual nem a variação de taxas populacionais.
+
+Se o CSV ainda não tiver os quatro anos, as contagens são reconstruídas da aba
+`CVLI` da planilha original, usando `readxl`. As covariáveis continuam vindo
+do CSV; nenhum arquivo de dados é sobrescrito.
+
+```{r importar-dados}
+df = as.data.frame(readr::read_csv(caminho_csv, show_col_types = FALSE))
+names(df) = trimws(sub("^\ufeff", "", names(df)))
+if (!all(c("code_muni", "municipio") %in% names(df))) {
+  stop("A base precisa das colunas code_muni e municipio.")
+}
+df$code_muni = as.character(df$code_muni)
+stopifnot(!anyNA(df$code_muni), !anyDuplicated(df$code_muni))
+colunas_cvli = paste0("cvli_", anos_cvli)
+
+if (!all(colunas_cvli %in% names(df))) {
+  if (!requireNamespace("readxl", quietly = TRUE)) {
+    stop("Instale readxl ou gere o CSV atualizado com criando df.ipynb.")
+  }
+  normalizar_nome = function(x) {
+    x = iconv(trimws(as.character(x)), from = "UTF-8", to = "ASCII//TRANSLIT")
+    gsub("[^a-z0-9]", "", tolower(x))
+  }
+  bruto = as.data.frame(readxl::read_excel(
+    file.path(pasta_dados, "CVLI_2009-a-2025.xlsx"), sheet = "CVLI"
+  ))
+  nomes_bruto = normalizar_nome(names(bruto))
+  coluna_municipio = match("municipio", nomes_bruto)
+  if (is.na(coluna_municipio)) stop("Coluna de município não encontrada na aba CVLI.")
+  coluna_ano = match("ano", nomes_bruto)
+  if (!is.na(coluna_ano)) {
+    ano_registro = as.integer(bruto[[coluna_ano]])
+  } else {
+    coluna_data = match("data", nomes_bruto)
+    if (is.na(coluna_data)) stop("Coluna de data não encontrada na aba CVLI.")
+    ano_registro = as.integer(format(as.Date(bruto[[coluna_data]]), "%Y"))
+  }
+  if (anyNA(ano_registro)) stop("Há anos inválidos na fonte de CVLI.")
+  chaves = normalizar_nome(df$municipio)
+  nomes_registros = normalizar_nome(bruto[[coluna_municipio]])
+  stopifnot(!anyNA(chaves), !anyDuplicated(chaves))
+  no_periodo = ano_registro %in% anos_cvli
+  if (anyNA(nomes_registros[no_periodo]) ||
+      any(!nomes_registros[no_periodo] %in% chaves)) {
+    stop("Há municípios da fonte de CVLI sem correspondência no CSV.")
+  }
+  for (ano in anos_cvli) {
+    if (!any(ano_registro == ano)) stop("Ano sem registros na fonte: ", ano)
+    df[[paste0("cvli_", ano)]] = as.integer(table(factor(
+      nomes_registros[ano_registro == ano], levels = chaves
+    )))
+  }
+  cat("Contagens de 2022 a 2025 reconstruídas da planilha original.\n")
+}
+
+stopifnot(all(vapply(df[colunas_cvli], is.numeric, logical(1))))
+contagens = as.matrix(df[colunas_cvli])
+stopifnot(all(is.finite(contagens)), all(contagens >= 0),
+          all(contagens == floor(contagens)))
+for (i in seq_along(targets)) {
+  df[[targets[[i]]]] = log1p(df[[paste0("cvli_", anos_finais[i])]]) - log1p(df$cvli_2022)
+}
+print(data.frame(Ano = anos_cvli, Total_CVLI = colSums(contagens),
+                 Municipios_com_zero = colSums(contagens == 0)), row.names = FALSE)
+```
+
+## Especificações e amostra comum
+
+| Modelo | Conteúdo |
+|:--|:--|
+| M1 | Controles de 2022 e crescimento populacional 2022–2025 |
+| M2 | M1 + CVLI inicial + seis participações setoriais |
+| M3 | M2 sem `tx_adm_pub`; especificação principal dos modelos espaciais |
+
+As especificações mantêm os controles do estudo original. O crescimento
+populacional 2022–2025 usa informação posterior ao início dos três intervalos
+e posterior ao fim dos targets de 2023 e 2024. Esses ajustes descrevem
+associações retrospectivas, não previsões feitas com informação de 2022.
+As participações de emprego mantêm a escala e o ano de referência da fonte.
+
+A amostra usa M2 e os três targets em conjunto. Valores ausentes ou não finitos
+são listados e excluídos de todos os ajustes. Zero setorial é válido; os
+controles em `log()` precisam ser positivos.
+
+```{r formulas-e-amostra}
+formula1 = crescimento_cvli_log_2022_2025 ~
+  log(urbanizacao_2022) + log(taxa_desocupacao_2022_pct) +
+  log(rendimento_medio_mensal_2022_brl) + log(populacao_2022) +
+  crescimento_populacional_2022_2025_pct + log(densidade_2022_hab_km2) +
+  log(taxa_sem_instrucao_ou_fundamental_incompleto_2022_pct)
+formula2 = update(formula1, . ~ . + log1p(cvli_2022) + tx_adm_pub + tx_agro +
+                    tx_comercio + tx_construcao_civil + tx_industria_transformacao + tx_servicos)
+formula3 = update(formula2, . ~ . - tx_adm_pub)
+formulas_por_target = lapply(targets, function(target) {
+  lapply(list(M1 = formula1, M2 = formula2, M3 = formula3), function(f) {
+    f[[2]] = as.name(target)
+    f
+  })
+})
+
+necessarias = unique(c(all.vars(formula2), unname(targets)))
+ausentes = setdiff(necessarias, names(df))
+if (length(ausentes) > 0) stop("Colunas ausentes: ", paste(ausentes, collapse = ", "))
+stopifnot(all(vapply(df[necessarias], is.numeric, logical(1))))
+vars_log = c("urbanizacao_2022", "taxa_desocupacao_2022_pct",
+              "rendimento_medio_mensal_2022_brl", "populacao_2022",
+              "densidade_2022_hab_km2",
+              "taxa_sem_instrucao_ou_fundamental_incompleto_2022_pct")
+nao_positivos = vapply(df[vars_log], function(x) sum(x <= 0, na.rm = TRUE), numeric(1))
+if (any(nao_positivos > 0)) {
+  print(nao_positivos[nao_positivos > 0])
+  stop("Há zeros ou negativos em controles com log. Reveja a transformação.")
+}
+quadros = lapply(formulas_por_target, function(fs) {
+  model.frame(fs$M2, data = df, na.action = na.pass)
+})
+valida = Reduce(`&`, lapply(quadros, function(quadro) {
+  Reduce(`&`, lapply(quadro, is.finite))
+}))
+if (any(!valida)) print(df[!valida, c("code_muni", "municipio"), drop = FALSE])
+base_modelo = df[valida, , drop = FALSE]
+base_modelo = base_modelo[order(base_modelo$code_muni), , drop = FALSE]
+rownames(base_modelo) = base_modelo$code_muni
+ids = base_modelo$code_muni
+stopifnot(nrow(base_modelo) > ncol(quadros[[1]]))
+print(data.frame(Total = nrow(df), Incluidos = nrow(base_modelo), Excluidos = sum(!valida)))
+```
+
+# Criação de Matrizes
+
+## Malha e alinhamento municipal
+
+A malha de 2022 é lida do cache local; só é baixada se não houver shapefile ou
+ZIP disponível. Usa SIRGAS 2000 / UTM 24S (metros). Todas as matrizes são comuns
+aos targets, padronizadas por linha (`style = "W"`), com diagonal zero e sem
+municípios isolados (`zero.policy = FALSE`).
+
+```{r malha-municipal}
+dir.create(pasta_malha, recursive = TRUE, showWarnings = FALSE)
+arquivo_zip = file.path(pasta_malha, "CE_Municipios_2022.zip")
+arquivo_shp = list.files(pasta_malha, pattern = "\\.shp$", full.names = TRUE, recursive = TRUE)
+if (length(arquivo_shp) == 0) {
+  if (!file.exists(arquivo_zip)) {
+    download.file(paste0(
+      "https://geoftp.ibge.gov.br/organizacao_do_territorio/",
+      "malhas_territoriais/malhas_municipais/",
+      "municipio_2022/UFs/CE/CE_Municipios_2022.zip"
+    ), destfile = arquivo_zip, mode = "wb")
+  }
+  unzip(arquivo_zip, exdir = pasta_malha)
+  arquivo_shp = list.files(pasta_malha, pattern = "\\.shp$", full.names = TRUE, recursive = TRUE)
+}
+stopifnot(length(arquivo_shp) == 1)
+malha_ce = sf::st_make_valid(sf::st_transform(sf::st_read(arquivo_shp, quiet = TRUE), 31984))
+stopifnot(!anyDuplicated(as.character(malha_ce$CD_MUN)))
+posicoes = match(ids, as.character(malha_ce$CD_MUN))
+if (anyNA(posicoes)) stop("Há municípios da base sem correspondência na malha.")
+malha_modelo = malha_ce[posicoes, ]
+stopifnot(identical(as.character(malha_modelo$CD_MUN), ids),
+          !any(sf::st_is_empty(malha_modelo)))
+coords = sf::st_coordinates(sf::st_centroid(sf::st_geometry(malha_modelo)))
+stopifnot(all(is.finite(coords)))
+```
+
+## Contiguidade rainha e KNN geográficas
+
+A rainha de primeira ordem é a referência. As KNN usam k = 4, 6, 8 e 10 para
+avaliar sensibilidade. São direcionadas: a escolha dos k vizinhos pode não ser
+recíproca.
+
+```{r matrizes-geograficas}
+vizinhos = spdep::poly2nb(malha_modelo, queen = TRUE, row.names = ids)
+sem_vizinhos = which(spdep::card(vizinhos) == 0)
+if (length(sem_vizinhos) > 0) {
+  print(base_modelo[sem_vizinhos, c("code_muni", "municipio")])
+  stop("Existem municípios sem vizinhos. Reveja a geometria/amostra.")
+}
+pesos_w = spdep::nb2listw(vizinhos, style = "W", zero.policy = FALSE)
+ks = c(4L, 6L, 8L, 10L)
+stopifnot(nrow(base_modelo) > max(ks))
+criar_w_knn = function(k) {
+  kn = spdep::knearneigh(coords, k = k, longlat = FALSE)
+  nb = spdep::knn2nb(kn, row.names = ids, sym = FALSE)
+  spdep::nb2listw(nb, style = "W", zero.policy = FALSE)
+}
+lista_w = c(list(Queen = pesos_w), setNames(lapply(ks, criar_w_knn), paste0("KNN", ks)))
+```
+
+## Matriz econômica e comparação com k = 6
+
+As seis participações no emprego formal definem o perfil econômico, sem
+padronização por desvio-padrão ou renormalização. A distância euclidiana escolhe
+os seis perfis mais próximos. A KNN geográfica de comparação também usa seis
+vizinhos, por distância entre centroides. Empates usam o código municipal.
+
+```{r matriz-economica}
+setores_economicos = c("tx_adm_pub", "tx_agro", "tx_comercio",
+                       "tx_construcao_civil", "tx_industria_transformacao", "tx_servicos")
+perfil_economico = as.matrix(base_modelo[setores_economicos])
+rownames(perfil_economico) = ids
+stopifnot(all(is.finite(perfil_economico)),
+          all(perfil_economico >= 0 & perfil_economico <= 1),
+          all(rowSums(perfil_economico) <= 1 + 1e-6))
+
+criar_knn_distancia = function(D, k, ids) {
+  n = nrow(D)
+  stopifnot(ncol(D) == n, length(ids) == n, !anyDuplicated(ids),
+            k >= 1L, k < n, all(is.finite(D)), all(D >= 0))
+  diag(D) = Inf
+  A = matrix(0, n, n, dimnames = list(ids, ids))
+  empates_corte = 0L
+  for (i in seq_len(n)) {
+    candidatos = which(seq_len(n) != i)
+    ordem = candidatos[order(D[i, candidatos], ids[candidatos])]
+    A[i, ordem[seq_len(k)]] = 1
+    if (k < length(ordem)) {
+      d_k = D[i, ordem[k]]
+      if (abs(d_k - D[i, ordem[k + 1L]]) <= 1e-12 * max(1, abs(d_k))) {
+        empates_corte = empates_corte + 1L
+      }
+    }
+  }
+  w = spdep::mat2listw(A, row.names = ids, style = "W", zero.policy = FALSE)
+  stopifnot(all(spdep::card(w$neighbours) == k))
+  list(w = w, empates_corte = empates_corte)
+}
+k_comparacao = 6L
+geo = criar_knn_distancia(as.matrix(dist(coords)), k_comparacao, ids)
+eco = criar_knn_distancia(as.matrix(dist(perfil_economico)), k_comparacao, ids)
+matrizes_comparacao = list(Queen = pesos_w, KNN_geografica = geo$w, KNN_economica = eco$w)
+matrizes_diagnostico = c(lista_w, list(KNN_economica = eco$w))
+
+for (w in c(matrizes_diagnostico, matrizes_comparacao)) {
+  W = spdep::listw2mat(w)
+  stopifnot(identical(attr(w$neighbours, "region.id"), ids),
+            all(diag(W) == 0), all(abs(rowSums(W) - 1) < 1e-10))
+}
+resumo_matrizes = do.call(rbind, lapply(names(matrizes_diagnostico), function(nome) {
+  nb = matrizes_diagnostico[[nome]]$neighbours
+  nv = spdep::card(nb)
+  data.frame(Matriz = nome, Min = min(nv), Media = mean(nv), Max = max(nv),
+             Componentes = spdep::n.comp.nb(nb)$nc,
+             Simetrica = spdep::is.symmetric.nb(nb, verbose = FALSE, force = TRUE))
+}))
+print(resumo_matrizes, row.names = FALSE)
+cat("Empates no corte: geográfica =", geo$empates_corte,
+    "; econômica =", eco$empates_corte, "\n")
+```
+
+# Criação de modelos
+
+## MQO: M1, M2 e M3 para cada target
+
+`fixest::feols()` estima MQO sem efeitos fixos e com covariância `iid`. As cópias
+`lm` usam as mesmas fórmulas e amostra para os diagnósticos. Os resultados ficam em
+`modelos_por_target[["2022_2023"]]`, `[["2022_2024"]]` e `[["2022_2025"]]`.
+Cada lista contém `mqo`, `lm`, `mv`, `gmm` e `comparacao`.
+
+```{r modelos-mqo}
+modelos_por_target = lapply(formulas_por_target, function(fs) {
+  mqo = lapply(fs, function(f) fixest::feols(f, data = base_modelo, vcov = "iid"))
+  auxiliares = lapply(fs, function(f) lm(f, data = base_modelo, na.action = na.fail))
+  b_fixest = coef(mqo$M3)
+  b_lm = coef(auxiliares$M3)[names(b_fixest)]
+  stopifnot(nobs(mqo$M3) == nobs(auxiliares$M3),
+            length(b_fixest) == length(coef(auxiliares$M3)), !anyNA(b_lm),
+            isTRUE(all.equal(unname(b_fixest), unname(b_lm), tolerance = 1e-6)),
+            identical(rownames(model.frame(auxiliares$M3)), ids))
+  list(mqo = mqo, lm = auxiliares)
+})
+```
+
+## SEM, SAR, SARAR e SDM por máxima verossimilhança
+
+M3 é a especificação dos modelos espaciais. Na rainha, SEM, SAR, SARAR e SDM
+usam autovalores. SEM e SDM das matrizes geográfica e econômica usam
+decomposição LU, que admite matrizes assimétricas. Os ajustes da rainha são
+reutilizados na comparação.
+
+```{r modelos-mv}
+for (target in names(targets)) {
+  f = formulas_por_target[[target]]$M3
+  quadro = model.frame(f, data = base_modelo, na.action = na.fail)
+  X = model.matrix(f, data = quadro)
+  stopifnot(all(is.finite(X)), qr(X)$rank == ncol(X))
+  X_sem_intercepto = X[, colnames(X) != "(Intercept)", drop = FALSE]
+  for (nome in names(matrizes_comparacao)) {
+    WX = spdep::listw2mat(matrizes_comparacao[[nome]]) %*% X_sem_intercepto
+    X_sdm = cbind(X, WX)
+    if (qr(X_sdm)$rank < ncol(X_sdm)) {
+      stop("Colinearidade exata entre X e WX em ", target, ": ", nome)
+    }
+  }
+  cat("Estimando modelos espaciais:", rotulos_targets[[target]], "\n")
+  mv = list(
+    SEM = spatialreg::errorsarlm(f, data = base_modelo, listw = pesos_w,
+      Durbin = FALSE, method = "eigen", na.action = na.fail, zero.policy = FALSE),
+    SAR = spatialreg::lagsarlm(f, data = base_modelo, listw = pesos_w,
+      Durbin = FALSE, method = "eigen", na.action = na.fail, zero.policy = FALSE),
+    SARAR = spatialreg::sacsarlm(f, data = base_modelo, listw = pesos_w, listw2 = pesos_w,
+      Durbin = FALSE, method = "eigen", na.action = na.fail, zero.policy = FALSE),
+    SDM = spatialreg::lagsarlm(f, data = base_modelo, listw = pesos_w,
+      Durbin = TRUE, method = "eigen", na.action = na.fail, zero.policy = FALSE)
+  )
+  comparacao = list(SEM_Queen = mv$SEM, SDM_Queen = mv$SDM)
+  for (nome in setdiff(names(matrizes_comparacao), "Queen")) {
+    w = matrizes_comparacao[[nome]]
+    comparacao[[paste0("SEM_", nome)]] = spatialreg::errorsarlm(
+      f, data = base_modelo, listw = w, Durbin = FALSE, method = "LU",
+      interval = c(-0.999, 0.999), na.action = na.fail, zero.policy = FALSE)
+    comparacao[[paste0("SDM_", nome)]] = spatialreg::lagsarlm(
+      f, data = base_modelo, listw = w, Durbin = TRUE, method = "LU",
+      interval = c(-0.999, 0.999), na.action = na.fail, zero.policy = FALSE)
+  }
+  for (nome in names(comparacao)) {
+    m = comparacao[[nome]]
+    parametro = if (startsWith(nome, "SEM_")) m$lambda else m$rho
+    if (abs(parametro) > 0.98) warning("Parâmetro próximo do limite: ", target, " / ", nome)
+  }
+  modelos_por_target[[target]]$mv = mv
+  modelos_por_target[[target]]$comparacao = comparacao
+}
+```
+
+## SEM por GMM nas matrizes geográficas
+
+`sphet::spreg(model = "error", het = TRUE)` admite inovações heterocedásticas.
+No `sphet`, `rho` é o parâmetro de erro espacial chamado `lambda` no
+`spatialreg`. GMM não elimina automaticamente endogeneidade das explicativas.
+
+```{r modelos-gmm}
+for (target in names(targets)) {
+  f = formulas_por_target[[target]]$M3
+  modelos_por_target[[target]]$gmm = lapply(lista_w, function(w) {
+    sphet::spreg(formula = f, data = base_modelo, listw = w,
+                 model = "error", het = TRUE, Durbin = FALSE, na.action = na.fail)
+  })
+}
+```
+
+# Output dos modelos
+
+## Summary de todos os modelos, por target
+
+`print(summary(...))` garante que todos os resultados dos loops apareçam.
+Para cada target, são exibidos M1–M3, os quatro modelos ML da rainha, SEM/SDM
+nas outras duas matrizes e os cinco SEM por GMM, com a saída nativa do R.
+
+Nos modelos SAR, SARAR e SDM, os coeficientes não são os impactos diretos,
+indiretos e totais; estes exigem cálculo próprio antes da interpretação.
+
+```{r summaries-modelos, results='markup'}
+imprimir_summaries = function(modelos, titulo) {
+  cat("\n", strrep("-", 70), "\n", titulo, "\n", sep = "")
+  for (nome in names(modelos)) {
+    cat("\n>>> ", nome, "\n", sep = "")
+    print(summary(modelos[[nome]]))
+  }
+}
+for (target in names(targets)) {
+  ajustes = modelos_por_target[[target]]
+  cat("\n", strrep("=", 80), "\nTARGET: ", rotulos_targets[[target]],
+      " | ", targets[[target]], "\n", sep = "")
+  imprimir_summaries(ajustes$mqo, "MQO: especificações M1, M2 e M3")
+  imprimir_summaries(ajustes$mv, "Máxima verossimilhança: matriz rainha, M3")
+  outras = ajustes$comparacao[!grepl("_Queen$", names(ajustes$comparacao))]
+  imprimir_summaries(outras, "SEM e SDM: matrizes geográfica e econômica, M3")
+  imprimir_summaries(ajustes$gmm, "SEM por GMM: rainha e KNN, M3")
+}
+```
+
+## AIC e BIC dentro de cada target
+
+Compara-se a mesma resposta na mesma amostra. Não se ranqueiam targets
+diferentes por AIC/BIC. GMM não entra nessas tabelas porque não usa a mesma
+verossimilhança. As diferenças de critérios são calculadas em cada tabela.
+
+```{r comparacao-aic-bic}
+comparar_ajustes = function(modelos) {
+  tabela = do.call(rbind, lapply(names(modelos), function(nome) {
+    m = modelos[[nome]]
+    ll = logLik(m)
+    n = length(residuals(m))
+    p = as.numeric(attr(ll, "df"))
+    data.frame(Modelo = nome, N = n, Parametros = p, LogLik = as.numeric(ll),
+               AIC = -2 * as.numeric(ll) + 2 * p,
+               BIC = -2 * as.numeric(ll) + log(n) * p)
+  }))
+  stopifnot(all(tabela$N == nrow(base_modelo)))
+  tabela$Delta_AIC = tabela$AIC - min(tabela$AIC)
+  tabela$Delta_BIC = tabela$BIC - min(tabela$BIC)
+  tabela = tabela[order(tabela$AIC), ]
+  rownames(tabela) = NULL
+  tabela
+}
+comparacoes_por_target = lapply(modelos_por_target, function(ajustes) {
+  list(Queen = comparar_ajustes(c(list(MQO_M3 = ajustes$lm$M3), ajustes$mv)),
+       Matrizes = comparar_ajustes(ajustes$comparacao))
+})
+for (target in names(targets)) {
+  cat("\nTARGET:", rotulos_targets[[target]], "— MQO e modelos ML da rainha\n")
+  print(comparacoes_por_target[[target]]$Queen, digits = 5, row.names = FALSE)
+  cat("\nSEM e SDM nas três matrizes\n")
+  print(comparacoes_por_target[[target]]$Matrizes, digits = 5, row.names = FALSE)
+}
+```
+
+## Robustez dos coeficientes GMM entre matrizes
+
+Cada coluna é uma matriz. Estrelas: `***` p < 0,01; `**` p < 0,05;
+`*` p < 0,10. Compare sinal, magnitude e significância das explicativas.
+A magnitude do parâmetro espacial depende da definição de W.
+
+```{r robustez-gmm}
+estrelas = function(p) {
+  as.character(cut(p, c(-Inf, 0.01, 0.05, 0.10, Inf),
+                   labels = c("***", "**", "*", ""), right = FALSE))
+}
+robustez_por_target = lapply(modelos_por_target, function(ajustes) {
+  tabelas = lapply(ajustes$gmm, function(m) summary(m)$CoefTable)
+  stopifnot(!any(vapply(tabelas, is.null, logical(1))))
+  termos = rownames(tabelas[[1]])
+  stopifnot(all(vapply(tabelas, function(ct) identical(rownames(ct), termos), logical(1))))
+  est = do.call(cbind, lapply(tabelas, function(ct) ct[, 1]))
+  pv = do.call(cbind, lapply(tabelas, function(ct) ct[, 4]))
+  matrix(paste0(formatC(est, digits = 4, format = "f"), estrelas(pv)),
+         nrow = nrow(est), dimnames = dimnames(est))
+})
+for (target in names(targets)) {
+  cat("\nTARGET:", rotulos_targets[[target]], "— SEM por GMM\n")
+  print(noquote(robustez_por_target[[target]]))
+}
+```
+
+# Diagnósticos dos modelos
+
+## Multicolinearidade, heterocedasticidade e HC3
+
+VIF usa M2 e M3. Se houver coeficientes não identificados, suas relações lineares
+são exibidas em vez de interromper os diagnósticos. Breusch–Pagan usa a versão
+studentizada no MQO M3. HC3 avalia a sensibilidade à heterocedasticidade do MQO;
+não corrige dependência espacial nem é a covariância do SEM.
+
+```{r diagnosticos-classicos}
+diagnosticos_classicos = lapply(modelos_por_target, function(ajustes) {
+  list(BP = lmtest::bptest(ajustes$lm$M3, studentize = TRUE),
+       HC3 = lmtest::coeftest(ajustes$lm$M3,
+                             vcov. = sandwich::vcovHC(ajustes$lm$M3, type = "HC3")))
+})
+for (target in names(targets)) {
+  cat("\nTARGET:", rotulos_targets[[target]], "\n")
+  for (nome in c("M2", "M3")) {
+    m = modelos_por_target[[target]]$lm[[nome]]
+    cat("\nMulticolinearidade:", nome, "\n")
+    if (anyNA(coef(m))) print(alias(m)) else print(car::vif(m))
+  }
+  print(diagnosticos_classicos[[target]]$BP)
+  cat("\nMQO M3: inferência com HC3\n")
+  print(diagnosticos_classicos[[target]]$HC3)
+}
+```
+
+## Gráficos do MQO M3
+
+```{r graficos-mqo, fig.width=9, fig.height=8}
+plotar_diagnosticos = function(modelo, titulo) {
+  op = par(mfrow = c(2, 2), oma = c(0, 0, 3, 0))
+  on.exit(par(op))
+  plot(modelo, which = c(1, 2, 4, 5))
+  mtext(titulo, outer = TRUE, line = 1)
+}
+for (target in names(targets)) {
+  plotar_diagnosticos(modelos_por_target[[target]]$lm$M3,
+                      paste("MQO M3 — target", rotulos_targets[[target]]))
+}
+```
+
+## Moran e testes RS por target e matriz
+
+Moran da resposta mede a autocorrelação de Y; Moran dos resíduos verifica a
+dependência remanescente no MQO. RS-erro, RS-lag e suas versões ajustadas
+investigam a forma de dependência. As versões ajustadas consideram a outra
+forma de dependência, sem constituir correção geral para heterocedasticidade.
+A tabela inclui rainha, KNN geográficas e matriz econômica.
+
+```{r diagnosticos-espaciais}
+diagnosticar_w = function(modelo, w) {
+  y = model.response(model.frame(modelo))
+  names(y) = rownames(model.frame(modelo))
+  list(
+    Moran_Y = spdep::moran.test(y, listw = w, alternative = "two.sided",
+      zero.policy = FALSE, spChk = TRUE),
+    Moran_Res = spdep::lm.morantest(modelo, listw = w, alternative = "two.sided",
+      zero.policy = FALSE, spChk = TRUE, naSubset = FALSE),
+    RS = spdep::lm.RStests(modelo, listw = w,
+      test = c("RSerr", "RSlag", "adjRSerr", "adjRSlag"),
+      zero.policy = FALSE, spChk = TRUE, naSubset = FALSE)
+  )
+}
+diagnosticos_espaciais = lapply(modelos_por_target, function(ajustes) {
+  lapply(matrizes_diagnostico, function(w) diagnosticar_w(ajustes$lm$M3, w))
+})
+for (target in names(targets)) {
+  testes = diagnosticos_espaciais[[target]]
+  tabela = do.call(rbind, lapply(names(testes), function(nome) {
+    d = testes[[nome]]
+    data.frame(Matriz = nome,
+      Moran_Y = unname(d$Moran_Y$estimate[1]), p_Moran_Y = d$Moran_Y$p.value,
+      Moran_Res = unname(d$Moran_Res$estimate[1]), p_Moran_Res = d$Moran_Res$p.value,
+      p_RSerr = d$RS$RSerr$p.value, p_RSlag = d$RS$RSlag$p.value,
+      p_adjRSerr = d$RS$adjRSerr$p.value, p_adjRSlag = d$RS$adjRSlag$p.value)
+  }))
+  colunas_p = grep("^p_", names(tabela), value = TRUE)
+  tabela[colunas_p] = lapply(tabela[colunas_p], format.pval, digits = 3, eps = 0.0001)
+  cat("\nTARGET:", rotulos_targets[[target]], "— diagnósticos espaciais do MQO M3\n")
+  print(tabela, digits = 4, row.names = FALSE)
+  cat("\nResultados completos: matriz rainha\n")
+  print(testes$Queen$Moran_Y)
+  print(testes$Queen$Moran_Res)
+  print(testes$Queen$RS)
+}
+```
+
+## Inovações do SEM nas três matrizes
+
+Para cada target e matriz, calcula-se `u - lambda * W u`, com `u = y - X beta`.
+O Moran das inovações é exploratório: seu p-valor usual não incorpora
+integralmente a estimação dos parâmetros do SEM. `lm.morantest()` é usado
+somente com os ajustes MQO da classe `lm`.
+
+```{r inovacoes-sem}
+diagnosticos_sem = lapply(names(targets), function(target) {
+  f = formulas_por_target[[target]]$M3
+  quadro = model.frame(f, data = base_modelo, na.action = na.fail)
+  y = model.response(quadro)
+  X = model.matrix(f, data = quadro)
+  lapply(names(matrizes_comparacao), function(nome) {
+    m = modelos_por_target[[target]]$comparacao[[paste0("SEM_", nome)]]
+    w = matrizes_comparacao[[nome]]
+    beta = m$coefficients[colnames(X)]
+    stopifnot(!anyNA(beta))
+    u = as.numeric(y - X %*% beta)
+    inovacoes = u - m$lambda * spdep::lag.listw(w, u, zero.policy = FALSE)
+    names(inovacoes) = ids
+    teste = spdep::moran.test(inovacoes, listw = w, alternative = "two.sided",
+                             zero.policy = FALSE, spChk = TRUE)
+    list(Matriz = nome, Inovacoes = inovacoes, Moran = teste)
+  })
+})
+names(diagnosticos_sem) = names(targets)
+for (target in names(targets)) {
+  cat("\nTARGET:", rotulos_targets[[target]], "— Moran das inovações SEM\n")
+  for (d in diagnosticos_sem[[target]]) {
+    cat("\nMatriz:", d$Matriz, "\n")
+    print(d$Moran)
+  }
+}
+```
+
+## Interpretação e reprodutibilidade
+
+- `log1p` é sensível a contagens pequenas. Os targets medem variação acumulada;
+  não foram divididos pelo número de anos de cada intervalo.
+- Justifique a especificação M3 e o tratamento de `tx_adm_pub`.
+- Declare a escolha de W e k. O ano do perfil econômico deve ser validado na fonte.
+- A quantidade de modelos e testes exige cautela com seleção por significância.
+  Os diagnósticos cobrem MQO e inovações SEM; SAR, SARAR e SDM também precisam de
+  avaliação específica de adequação e impactos antes da interpretação.
+
+```{r sessao}
+sessionInfo()
+```
